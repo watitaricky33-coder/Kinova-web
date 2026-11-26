@@ -490,7 +490,7 @@ export async function resolveAnimeEpisode123(params: {
             buildProxyUrl(trUrl, originBase, '/api/sub-proxy', {
               referer: `${embedOrigin}/`,
               origin: embedOrigin,
-            }) + '&format=vtt',
+            }),
           format: trUrl.toLowerCase().includes('.srt') ? 'srt' : 'vtt',
         });
       }
