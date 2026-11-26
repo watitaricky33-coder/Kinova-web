@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Deny all access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Schema Validators
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.market is string && data.market.size() >= 2 && data.market.size() <= 40 &&
+             data.preferredQuality is string && data.preferredQuality in ['Auto', '1080p', '720p', 'Data Saver'] &&
+             data.wifiOnlyStreaming is bool &&
+             data.wifiOnlyDownloads is bool &&
+             (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 150)) &&
+             (!('avatarUrl' in data) || data.avatarUrl == null || (data.avatarUrl is string && data.avatarUrl.size() <= 500)) &&
+             (!('preferredLanguage' in data) || data.preferredLanguage == null || (data.preferredLanguage is string && data.preferredLanguage.size() <= 40)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidWatchlistItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.contentId is string && data.contentId.size() >= 1 && data.contentId.size() <= 128 &&
+             data.contentType is string && data.contentType in ['MOVIE', 'SERIES'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             (!('posterUrl' in data) || data.posterUrl == null || (data.posterUrl is string && data.posterUrl.size() <= 1000)) &&
+             data.releaseYear is int && data.releaseYear >= 0 && data.releaseYear <= 2100 &&
+             (!('genre' in data) || data.genre == null || (data.genre is string && data.genre.size() <= 120)) &&
+             data.runtimeSeconds is int && data.runtimeSeconds >= 0 &&
+             data.isPlayable is bool &&
+             data.addedAt is timestamp && data.addedAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidWatchProgress(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.contentId is string && data.contentId.size() >= 1 && data.contentId.size() <= 128 &&
+             data.episodeId is string && data.episodeId.size() <= 128 &&
+             data.contentType is string && data.contentType in ['MOVIE', 'EPISODE'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             (!('subtitle' in data) || data.subtitle == null || (data.subtitle is string && data.subtitle.size() <= 200)) &&
+             (!('posterUrl' in data) || data.posterUrl == null || (data.posterUrl is string && data.posterUrl.size() <= 1000)) &&
+             data.positionMs is int && data.positionMs >= 0 &&
+             data.durationMs is int && data.durationMs >= 0 &&
+             data.completed is bool &&
+             data.lastWatchedAt is timestamp && data.lastWatchedAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidViewingHistory(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.contentId is string && data.contentId.size() >= 1 && data.contentId.size() <= 128 &&
+             data.episodeId is string && data.episodeId.size() <= 128 &&
+             data.contentType is string && data.contentType in ['MOVIE', 'EPISODE'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             (!('posterUrl' in data) || data.posterUrl == null || (data.posterUrl is string && data.posterUrl.size() <= 1000)) &&
+             data.watchedSeconds is int && data.watchedSeconds >= 0 &&
+             data.completed is bool &&
+             data.watchedAt is timestamp && data.watchedAt <= request.time;
+    }
+
+    // User Profiles (/users/{userId}) - strict owner isolation for PII protection
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'market', 'preferredQuality', 'wifiOnlyStreaming', 'wifiOnlyDownloads', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'avatarUrl', 'market', 'preferredLanguage', 'preferredQuality', 'wifiOnlyStreaming', 'wifiOnlyDownloads', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'avatarUrl', 'market', 'preferredLanguage', 'preferredQuality', 'wifiOnlyStreaming', 'wifiOnlyDownloads', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // User Watchlist (/users/{userId}/watchlist/{itemId})
+      match /watchlist/{itemId} {
+        allow get: if isOwner(userId) && isValidId(itemId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'contentId', 'contentType', 'title', 'releaseYear', 'runtimeSeconds', 'isPlayable', 'addedAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'contentId', 'contentType', 'title', 'posterUrl', 'releaseYear', 'genre', 'runtimeSeconds', 'isPlayable', 'addedAt', 'updatedAt']) &&
+                         isValidWatchlistItem(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         isValidWatchlistItem(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().contentId == existing().contentId &&
+                         incoming().addedAt == existing().addedAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'posterUrl', 'releaseYear', 'genre', 'runtimeSeconds', 'isPlayable', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(itemId);
+      }
+
+      // User Watch Progress (/users/{userId}/watch_progress/{progressId})
+      match /watch_progress/{progressId} {
+        allow get: if isOwner(userId) && isValidId(progressId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(progressId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'contentId', 'episodeId', 'contentType', 'title', 'positionMs', 'durationMs', 'completed', 'lastWatchedAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'contentId', 'episodeId', 'contentType', 'title', 'subtitle', 'posterUrl', 'positionMs', 'durationMs', 'completed', 'lastWatchedAt', 'updatedAt']) &&
+                         isValidWatchProgress(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(progressId) &&
+                         isValidWatchProgress(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().contentId == existing().contentId &&
+                         incoming().episodeId == existing().episodeId &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'subtitle', 'posterUrl', 'positionMs', 'durationMs', 'completed', 'lastWatchedAt', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(progressId);
+      }
+
+      // User Viewing History (/users/{userId}/viewing_history/{historyId})
+      match /viewing_history/{historyId} {
+        allow get: if isOwner(userId) && isValidId(historyId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(historyId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'contentId', 'episodeId', 'contentType', 'title', 'watchedSeconds', 'completed', 'watchedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'contentId', 'episodeId', 'contentType', 'title', 'posterUrl', 'watchedSeconds', 'completed', 'watchedAt']) &&
+                         isValidViewingHistory(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(historyId) &&
+                         isValidViewingHistory(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().contentId == existing().contentId &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'posterUrl', 'watchedSeconds', 'completed', 'watchedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(historyId);
+      }
+    }
+  }
+}

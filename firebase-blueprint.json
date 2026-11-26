@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated KINOVA viewer profile and cross-device playback preferences",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the profile owner" },
+        "displayName": { "type": "string", "description": "Viewer display name" },
+        "email": { "type": "string", "description": "Viewer email from Google account" },
+        "avatarUrl": { "type": "string", "description": "Profile photo URL" },
+        "market": { "type": "string", "description": "Content market/region (e.g. Kenya, East Africa, International)" },
+        "preferredLanguage": { "type": "string", "description": "Preferred audio/UI language" },
+        "preferredQuality": { "type": "string", "description": "Preferred streaming quality" },
+        "wifiOnlyStreaming": { "type": "boolean", "description": "Restrict HD streaming to Wi-Fi" },
+        "wifiOnlyDownloads": { "type": "boolean", "description": "Restrict offline downloads to Wi-Fi" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update" }
+      },
+      "required": ["userId", "displayName", "market", "preferredQuality", "wifiOnlyStreaming", "wifiOnlyDownloads", "createdAt", "updatedAt"]
+    },
+    "WatchlistItem": {
+      "title": "WatchlistItem",
+      "description": "Movie or series saved to a user's My List",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "contentId": { "type": "string" },
+        "contentType": { "type": "string", "enum": ["MOVIE", "SERIES"] },
+        "title": { "type": "string" },
+        "posterUrl": { "type": "string" },
+        "releaseYear": { "type": "integer" },
+        "genre": { "type": "string" },
+        "runtimeSeconds": { "type": "integer" },
+        "isPlayable": { "type": "boolean" },
+        "addedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "contentId", "contentType", "title", "releaseYear", "runtimeSeconds", "isPlayable", "addedAt", "updatedAt"]
+    },
+    "WatchProgress": {
+      "title": "WatchProgress",
+      "description": "Playback resume position for a movie or series episode",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "contentId": { "type": "string" },
+        "episodeId": { "type": "string" },
+        "contentType": { "type": "string", "enum": ["MOVIE", "EPISODE"] },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "posterUrl": { "type": "string" },
+        "positionMs": { "type": "integer" },
+        "durationMs": { "type": "integer" },
+        "completed": { "type": "boolean" },
+        "lastWatchedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "contentId", "episodeId", "contentType", "title", "positionMs", "durationMs", "completed", "lastWatchedAt", "updatedAt"]
+    },
+    "ViewingHistoryEntry": {
+      "title": "ViewingHistoryEntry",
+      "description": "Viewing history entry synced across devices",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "contentId": { "type": "string" },
+        "episodeId": { "type": "string" },
+        "contentType": { "type": "string", "enum": ["MOVIE", "EPISODE"] },
+        "title": { "type": "string" },
+        "posterUrl": { "type": "string" },
+        "watchedSeconds": { "type": "integer" },
+        "completed": { "type": "boolean" },
+        "watchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "contentId", "episodeId", "contentType", "title", "watchedSeconds", "completed", "watchedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated user's KINOVA profile and preferences"
+    },
+    "/users/{userId}/watchlist/{itemId}": {
+      "schema": { "$ref": "#/entities/WatchlistItem" },
+      "description": "Saved movies and series in the user's cross-device My List"
+    },
+    "/users/{userId}/watch_progress/{progressId}": {
+      "schema": { "$ref": "#/entities/WatchProgress" },
+      "description": "Cross-device Continue Watching playback positions"
+    },
+    "/users/{userId}/viewing_history/{historyId}": {
+      "schema": { "$ref": "#/entities/ViewingHistoryEntry" },
+      "description": "Chronological viewing history for the authenticated viewer"
+    }
+  }
+}

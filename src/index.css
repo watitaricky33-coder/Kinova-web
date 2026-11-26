@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Cinzel";
+  src: url("/fonts/cinzel.ttf") format("truetype");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Playfair Display";
+  src: url("/fonts/playfair_display.ttf") format("truetype");
+  font-weight: 400 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("/fonts/plus_jakarta_sans.ttf") format("truetype");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains_mono.ttf") format("truetype");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --color-obsidian: #0A0A0C;
+  --color-surface: #141418;
+  --color-elevated: #1F1F24;
+  --color-crimson: #E50914;
+  --color-gold: #F2C94C;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #9E9EA8;
+  --color-border-subtle: #2A2A32;
+  --font-display: "Cinzel", Georgia, serif;
+  --font-editorial: "Playfair Display", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: dark;
+  background-color: #0A0A0C;
+  color: #FFFFFF;
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: #0A0A0C;
+  color: #FFFFFF;
+  overflow-x: hidden;
+}
+
+/* Custom subtle scrollbars for horizontal carousels */
+.kinova-scroll::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.kinova-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.kinova-scroll::-webkit-scrollbar-thumb {
+  background: rgba(158, 158, 168, 0.25);
+  border-radius: 9999px;
+}
+
+.kinova-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(229, 9, 20, 0.55);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

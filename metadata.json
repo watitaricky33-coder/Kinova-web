@@ -1,0 +1,6 @@
+{
+  "name": "KINOVA",
+  "description": "KINOVA — Stories worth watching. Streaming verified movies and series with offline downloads and cross-device profile sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
