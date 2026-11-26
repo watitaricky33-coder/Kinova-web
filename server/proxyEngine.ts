@@ -2,7 +2,13 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
+import { lookup } from 'node:dns';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { Agent, fetch as guardedFetch } from 'undici';
 import type { Request, Response } from 'express';
+import { buildMediaLink } from './mediaLinks.ts';
 
 // Keep-alive agents inspired by 123anime-api/routes/play.js and streamrelay/server.js
 export const httpKeepAliveAgent = new http.Agent({
@@ -86,13 +92,12 @@ export function isPrivateOrReservedIp(ipRaw: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
     if (a >= 224) return true;
     return false;
   }
   if (version === 6 || net.isIPv6(ip)) {
-    if (ip === '::' || ip === '::1') return true;
-    if (ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
-    return false;
+    return !/^[23][0-9a-f]{3}:/i.test(ip) || ip.startsWith('2001:db8:');
   }
   return false;
 }
@@ -112,6 +117,7 @@ export function validateExternalProxyTarget(
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return { ok: false, reason: 'Unsupported URL scheme (http/https only)' };
   }
+  if (parsed.username || parsed.password) return { ok: false, reason: 'Credentials are not allowed in media URLs' };
   const hostname = parsed.hostname.toLowerCase();
   if (!hostname) return { ok: false, reason: 'URL missing hostname' };
   if (!allowPrivateForTest) {
@@ -120,6 +126,45 @@ export function validateExternalProxyTarget(
     }
   }
   return { ok: true, url: parsed };
+}
+
+const mediaAgent = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      lookup(hostname, { all: true, family: options.family }, (error, addresses) => {
+        if (error) return callback(error, '', 0);
+        const publicAddresses = addresses.filter(({ address }) => !isPrivateOrReservedIp(address));
+        if (!publicAddresses.length) return callback(new Error('Blocked private media host'), '', 0);
+        if (options.all) return callback(null, publicAddresses);
+        return callback(null, publicAddresses[0].address, publicAddresses[0].family);
+      });
+    },
+  },
+});
+
+export async function fetchExternalMedia(rawUrl: string, options: {
+  headers?: Record<string, string>;
+  method?: 'GET' | 'HEAD';
+  signal: AbortSignal;
+}, allowPrivateForTest = false) {
+  let target = rawUrl;
+  let headers = options.headers;
+  for (let redirects = 0; redirects <= 5; redirects++) {
+    const validation = validateExternalProxyTarget(target, allowPrivateForTest);
+    if (!validation.ok || !validation.url) throw new Error(validation.reason || 'Invalid media URL');
+    const response = await guardedFetch(validation.url, {
+      ...options, headers, redirect: 'manual', dispatcher: allowPrivateForTest ? undefined : mediaAgent,
+    });
+    const location = response.headers.get('location');
+    if (![301, 302, 303, 307, 308].includes(response.status) || !location) return response;
+    await response.body?.cancel();
+    const redirect = new URL(location, validation.url);
+    if (redirect.origin !== validation.url.origin && headers) {
+      headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !/^(authorization|cookie)$/i.test(name)));
+    }
+    target = redirect.href;
+  }
+  throw new Error('Too many media redirects');
 }
 
 // Host-based upstream header rule map ported from MHSanaei/HLS-Proxy-Worker + free-moveis-api + x8rr/movies + 123anime-api
@@ -347,7 +392,7 @@ export function buildProxyUrl(
   if (upstreamHeaders.referer) params.set('referer', upstreamHeaders.referer);
   if (upstreamHeaders.origin) params.set('origin', upstreamHeaders.origin);
   if (upstreamHeaders.headersJson) params.set('headers', upstreamHeaders.headersJson);
-  const rel = `${endpointPath}?${params.toString()}`;
+  const rel = buildMediaLink(endpointPath, params);
   const base = String(originBase || '').trim().replace(/\/+$/, '');
   return base ? `${base}${rel}` : rel;
 }
@@ -366,7 +411,7 @@ export function buildDownloadEndpointUrl(params: {
   q.set('filename', params.filename);
   if (params.referer) q.set('referer', params.referer);
   if (params.origin) q.set('origin', params.origin);
-  const rel = `/api/streams/download?${q.toString()}`;
+  const rel = buildMediaLink('/api/streams/download', q);
   const base = String(params.originBase || '').trim().replace(/\/+$/, '');
   return base ? `${base}${rel}` : rel;
 }
@@ -476,32 +521,52 @@ export interface VerifyResult {
 async function fetchSegmentBytes(
   segUrl: URL,
   headers: Record<string, string>,
-  signal: AbortSignal
+  signal: AbortSignal,
+  allowPrivateForTest: boolean
 ): Promise<{ status: number; ct: string; buf: Buffer }> {
   const sliceHeaders = resolveUpstreamHeaders(segUrl, {
     ...headers,
     Range: 'bytes=0-65535',
   });
-  let res = await fetch(segUrl.toString(), {
+  let res = await fetchExternalMedia(segUrl.toString(), {
     method: 'GET',
     headers: sliceHeaders,
-    redirect: 'follow',
     signal,
-  });
+  }, allowPrivateForTest);
 
   if (res.status === 403 || res.status === 416) {
     const noRangeHeaders = resolveUpstreamHeaders(segUrl, headers);
-    res = await fetch(segUrl.toString(), {
+    await res.body?.cancel();
+    res = await fetchExternalMedia(segUrl.toString(), {
       method: 'GET',
       headers: noRangeHeaders,
-      redirect: 'follow',
       signal,
-    });
+    }, allowPrivateForTest);
   }
 
   const ct = (res.headers.get('content-type') || '').toLowerCase();
-  const buf = Buffer.from(await res.arrayBuffer());
+  const buf = await readProbeBytes(res, 128 * 1024);
   return { status: res.status, ct, buf };
+}
+
+async function readProbeBytes(response: Awaited<ReturnType<typeof fetchExternalMedia>>, limit: number): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let remaining = limit;
+  try {
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = value.subarray(0, remaining);
+      chunks.push(Buffer.from(take));
+      remaining -= take.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
 }
 
 export async function verifyPlayableCandidate(
@@ -528,30 +593,30 @@ export async function verifyPlayableCandidate(
         : { ...headers, Range: 'bytes=0-131071' };
       const mergedHeaders = resolveUpstreamHeaders(currentUrl, extraHeaders);
 
-      let response = await fetch(currentUrl.toString(), {
+      let response = await fetchExternalMedia(currentUrl.toString(), {
         method: 'GET',
         headers: mergedHeaders,
-        redirect: 'follow',
         signal: controller.signal,
-      });
+      }, allowPrivateForTest);
 
       if ((response.status === 403 || response.status === 416) && 'Range' in mergedHeaders) {
         const retryHeaders = { ...mergedHeaders };
         delete retryHeaders['Range'];
-        response = await fetch(currentUrl.toString(), {
+        await response.body?.cancel();
+        response = await fetchExternalMedia(currentUrl.toString(), {
           method: 'GET',
           headers: retryHeaders,
-          redirect: 'follow',
           signal: controller.signal,
-        });
+        }, allowPrivateForTest);
       }
 
       if (!response.ok && response.status !== 206) {
+        await response.body?.cancel();
         return { ok: false, reason: `HTTP ${response.status}` };
       }
 
       const ct = (response.headers.get('content-type') || '').toLowerCase();
-      const buf = Buffer.from(await response.arrayBuffer());
+      const buf = await readProbeBytes(response, isLikelyM3u8 || ct.includes('mpegurl') ? 2 * 1024 * 1024 : 128 * 1024);
       if (buf.length === 0) {
         return { ok: false, reason: 'Empty upstream body' };
       }
@@ -585,7 +650,7 @@ export async function verifyPlayableCandidate(
           return { ok: false, reason: 'Invalid HLS segment URL' };
         }
 
-        const seg = await fetchSegmentBytes(segVal.url, headers, controller.signal);
+        const seg = await fetchSegmentBytes(segVal.url, headers, controller.signal, allowPrivateForTest);
         if (seg.status !== 200 && seg.status !== 206) {
           return { ok: false, reason: `HLS segment[0] returned HTTP ${seg.status}` };
         }
@@ -731,23 +796,22 @@ export async function handleUnifiedProxyRequest(
   const timer = setTimeout(() => controller.abort(), 25_000);
 
   try {
-    let upstream = await fetch(validation.url.toString(), {
+    let upstream = await fetchExternalMedia(validation.url.toString(), {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       headers: forwardHeaders,
-      redirect: 'follow',
       signal: controller.signal,
-    });
+    }, allowPrivateForTest);
 
     // Fallback once without Origin header if CDN rejected cross-origin header on segment fetch
     if (upstream.status === 403 && 'Origin' in forwardHeaders) {
       const stripped = { ...forwardHeaders };
       delete stripped['Origin'];
-      upstream = await fetch(validation.url.toString(), {
+      await upstream.body?.cancel();
+      upstream = await fetchExternalMedia(validation.url.toString(), {
         method: req.method === 'HEAD' ? 'HEAD' : 'GET',
         headers: stripped,
-        redirect: 'follow',
         signal: controller.signal,
-      });
+      }, allowPrivateForTest);
     }
 
     const upstreamCt = (upstream.headers.get('content-type') || 'application/octet-stream').toLowerCase();
@@ -822,7 +886,7 @@ export async function handleUnifiedProxyRequest(
       req.method !== 'HEAD' &&
       upstream.body &&
       !isImageDisguised &&
-      (hasRangeHeader || contentLength > 4 * 1024 * 1024)
+      (hasRangeHeader || contentLength > 4 * 1024 * 1024 || upstreamCt.startsWith('video/') && mode === 'auto')
     ) {
       res.status(upstream.status === 206 ? 206 : 200);
       res.setHeader('Content-Type', inferSegmentContentType(targetPathLower, upstreamCt));
@@ -835,25 +899,9 @@ export async function handleUnifiedProxyRequest(
         res.setHeader('Content-Disposition', `attachment; filename="${fname.replace(/[^a-zA-Z0-9._-]/g, '_')}"`);
       }
 
-      const reader = upstream.body.getReader();
-      req.on('close', () => {
-        void reader.cancel().catch(() => {});
-      });
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!res.writableEnded && value) {
-            const ok = res.write(Buffer.from(value));
-            if (!ok) {
-              await new Promise<void>((resolve) => res.once('drain', resolve));
-            }
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
-      if (!res.writableEnded) res.end();
+      clearTimeout(timer);
+      res.flushHeaders();
+      await pipeline(upstream.body, res);
       return;
     }
 
@@ -976,12 +1024,14 @@ export async function handleStreamDownloadRequest(
     origin,
     headersJson,
   });
+  const deadline = Date.now() + 17_000;
 
   if (req.method === 'HEAD') {
     const check = await verifyPlayableCandidate(
       validation.url.toString(),
       parseExplicitQueryHeaders(req).headersMap,
-      5000
+      5000,
+      allowPrivateForTest
     );
     if (!check.ok) {
       res.status(502).json({ error: check.reason || 'Download source unavailable' });
@@ -998,10 +1048,10 @@ export async function handleStreamDownloadRequest(
   // does not waste 15-30s probing all bitrate variants sequentially.
   let ffmpegInputUrl = proxiedM3u8Url;
   try {
-    const manifestProbe = await fetch(proxiedM3u8Url, { signal: AbortSignal.timeout(8000) });
+    const manifestProbe = await fetch(proxiedM3u8Url, { signal: AbortSignal.timeout(3500) });
     if (manifestProbe.ok) {
       const manifestText = await manifestProbe.text();
-      if (manifestText.includes('#EXT-X-STREAM-INF')) {
+      if (manifestText.includes('#EXT-X-STREAM-INF') && !manifestText.includes('#EXT-X-MEDIA:')) {
         const bestVariant = pickBestHlsVariant(manifestText, proxiedM3u8Url);
         if (bestVariant) {
           ffmpegInputUrl = bestVariant;
@@ -1013,16 +1063,97 @@ export async function handleStreamDownloadRequest(
   }
 
   const mp4Filename = safeFilename.endsWith('.mp4') ? safeFilename : `${safeFilename}.mp4`;
+  const inputs = [...new Set([ffmpegInputUrl, proxiedM3u8Url])];
+  for (const input of inputs) {
+    const budget = Math.min(deadline - Date.now(), 6_000);
+    if (budget <= 0) break;
+    const outcome = await remuxToMp4({ url: input }, res, mp4Filename, budget);
+    if (outcome === 'done' || res.destroyed) return;
+    if (outcome === 'unavailable') {
+      await streamConcatenatedHlsTs(proxiedM3u8Url, res, safeFilename.replace(/\.mp4$/i, '.ts'));
+      return;
+    }
+  }
+  const budget = deadline - Date.now();
+  if (budget > 0) {
+    const segments = await findTransportStreamSegments(ffmpegInputUrl, AbortSignal.timeout(budget)).catch(() => null);
+    const remaining = deadline - Date.now();
+    if (segments?.length && remaining > 0 && !res.destroyed) {
+      const outcome = await remuxToMp4({ segments }, res, mp4Filename, remaining);
+      if (outcome === 'done' || res.destroyed) return;
+    }
+  }
+  if (res.destroyed) return;
+  res.status(502).json({ error: 'This source could not be packaged. Try another stream source.' });
+}
+
+async function findTransportStreamSegments(manifestUrl: string, signal: AbortSignal): Promise<string[] | null> {
+  const response = await fetch(manifestUrl, { signal });
+  if (!response.ok) return null;
+  const text = await response.text();
+  if (!text.includes('#EXT-X-ENDLIST') || /#EXT-X-(?:STREAM-INF|MAP|BYTERANGE|DISCONTINUITY)\b|#EXT-X-KEY:METHOD=(?!NONE)/.test(text)) {
+    return null;
+  }
+  const localOrigin = new URL(manifestUrl).origin;
+  const segments = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+  const urls = segments.map((segment) => new URL(segment, manifestUrl));
+  if (urls.some((url) => url.origin !== localOrigin || url.pathname !== '/api/ts-proxy')) return null;
+  return urls.map((url) => url.href);
+}
+
+async function* transportStreamChunks(segments: string[], signal: AbortSignal) {
+  for (const segment of segments) {
+    const response = await fetch(segment, { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
+    if (!response.ok || !response.body) throw new Error('Download segment unavailable');
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        yield value;
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+}
+
+function remuxToMp4(
+  input: { url: string } | { segments: string[] },
+  res: Response,
+  filename: string,
+  startupTimeout: number
+): Promise<'done' | 'retry' | 'unavailable'> {
+  const inputArgs = 'segments' in input ? ['-f', 'mpegts', '-i', 'pipe:0'] : [
+    '-protocol_whitelist',
+    'http,tcp,crypto',
+    '-analyzeduration',
+    '2000000',
+    '-rw_timeout',
+    '7000000',
+    '-http_seekable',
+    '0',
+    '-http_persistent',
+    '0',
+    '-http_multiple',
+    '0',
+    '-f',
+    'hls',
+    '-i',
+    input.url,
+  ];
   const ffArgs = [
     '-hide_banner',
     '-loglevel',
     'error',
-    '-i',
-    ffmpegInputUrl,
+    ...inputArgs,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
     '-c',
     'copy',
-    '-bsf:a',
-    'aac_adtstoasc',
     '-f',
     'mp4',
     '-movflags',
@@ -1030,51 +1161,54 @@ export async function handleStreamDownloadRequest(
     'pipe:1',
   ];
 
-  const ff = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let started = false;
-  let stderr = '';
-  let finished = false;
-
-  ff.stderr.on('data', (chunk: Buffer) => {
-    stderr += chunk.toString();
-    if (stderr.length > 3000) stderr = stderr.slice(-3000);
-  });
-
-  ff.stdout.once('data', (firstChunk: Buffer) => {
-    started = true;
-    res.status(200);
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Accept-Ranges', 'none');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Disposition', `attachment; filename="${mp4Filename}"`);
-    res.write(firstChunk);
-    ff.stdout.pipe(res);
-  });
-
-  ff.on('error', async () => {
-    if (finished || started || res.headersSent) return;
-    finished = true;
-    // Pure Node fallback if ffmpeg binary is unavailable: stream unwrapped segments as .ts
-    await streamConcatenatedHlsTs(proxiedM3u8Url, res, safeFilename.replace(/\.mp4$/i, '.ts'));
-  });
-
-  ff.on('close', () => {
-    if (finished) return;
-    finished = true;
-    if (!started && !res.headersSent) {
-      res.status(502).json({
-        error: 'Failed to package stream for download',
-        detail: stderr.slice(-400).trim(),
-      });
-    } else if (!res.writableEnded) {
-      res.end();
+  let executable = 'ffmpeg';
+  try {
+    const packagePath = createRequire(import.meta.url).resolve('ffmpeg-static/package.json');
+    executable = join(dirname(packagePath), process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+  } catch {
+    executable = 'ffmpeg';
+  }
+  return new Promise((resolve) => {
+    const ff = spawn(executable, ffArgs, { stdio: ['pipe', 'pipe', 'ignore'] });
+    const controller = new AbortController();
+    let started = false;
+    const stop = () => { if (ff.exitCode === null && !ff.killed) ff.kill('SIGKILL'); };
+    const timer = setTimeout(stop, startupTimeout);
+    res.once('close', stop);
+    if ('segments' in input) {
+      void pipeline(transportStreamChunks(input.segments, controller.signal), ff.stdin).catch(stop);
+    } else {
+      ff.stdin.end();
     }
-  });
 
-  req.on('close', () => {
-    if (ff.exitCode === null && !ff.killed) {
-      ff.kill('SIGKILL');
-    }
+    ff.stdout.once('data', (firstChunk: Buffer) => {
+      if (res.destroyed) return;
+      started = true;
+      clearTimeout(timer);
+      res.status(200);
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Accept-Ranges', 'none');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.write(firstChunk);
+      ff.stdout.pipe(res, { end: false });
+    });
+
+    ff.once('error', () => {
+      clearTimeout(timer);
+      res.off('close', stop);
+      resolve('unavailable');
+    });
+    ff.once('close', (code) => {
+      controller.abort();
+      clearTimeout(timer);
+      res.off('close', stop);
+      if (started && !res.destroyed) {
+        if (code === 0) res.end();
+        else res.destroy();
+      }
+      resolve(started || res.destroyed ? 'done' : 'retry');
+    });
   });
 }
 
@@ -1090,6 +1224,7 @@ async function streamConcatenatedHlsTs(
       return;
     }
     let text = await manifestRes.text();
+    let manifestUrl = proxiedM3u8Url;
     if (text.includes('#EXT-X-STREAM-INF')) {
       const variant = pickBestHlsVariant(text, proxiedM3u8Url);
       if (!variant) {
@@ -1102,6 +1237,12 @@ async function streamConcatenatedHlsTs(
         return;
       }
       text = await manifestRes.text();
+      manifestUrl = variant;
+    }
+
+    if (/#EXT-X-(?:MAP|BYTERANGE):|#EXT-X-KEY:METHOD=(?!NONE)/.test(text)) {
+      res.status(502).json({ error: 'This download requires the MP4 packager.' });
+      return;
     }
 
     const segments = text
@@ -1121,7 +1262,7 @@ async function streamConcatenatedHlsTs(
 
     for (const segUrl of segments) {
       if (res.writableEnded) break;
-      const segRes = await fetch(segUrl, { signal: AbortSignal.timeout(15_000) });
+      const segRes = await fetch(new URL(segUrl, manifestUrl), { signal: AbortSignal.timeout(15_000) });
       if (!segRes.ok) throw new Error(`Segment HTTP ${segRes.status}`);
       const buf = Buffer.from(await segRes.arrayBuffer());
       res.write(buf);
@@ -1131,7 +1272,7 @@ async function streamConcatenatedHlsTs(
     if (!res.headersSent) {
       res.status(502).json({ error: err instanceof Error ? err.message : 'Download stream error' });
     } else if (!res.writableEnded) {
-      res.end();
+      res.destroy();
     }
   }
 }

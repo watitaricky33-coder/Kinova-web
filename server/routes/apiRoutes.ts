@@ -6,21 +6,22 @@ import {
   handleStreamDownloadRequest,
   handleUnifiedProxyRequest,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
+} from '../proxyEngine.ts';
 import {
   probeVidZeeHealth,
   resolveMovieOrTvStreams,
   type ResolvedStreamSource,
   type ResolvedSubtitleTrack,
-} from '../providers/vidzeeProvider.js';
+} from '../providers/vidzeeProvider.ts';
 import {
   getAnimeDetails123,
   getPopularAnime123,
   probeAnime123Health,
   resolveAnimeEpisode123,
   searchAnime123,
-} from '../providers/animeProvider.js';
+} from '../providers/animeProvider.ts';
 import {
+  findTmdbTvIdByTitle,
   getHomeDiscovery,
   getMovieDetailsFull,
   getMoviesCatalog,
@@ -28,11 +29,14 @@ import {
   getSeriesDetailsFull,
   isTmdbConfigured,
   searchAllCatalog,
-} from '../providers/tmdbService.js';
+} from '../providers/tmdbService.ts';
 
-export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } = {}) {
+export function createApiRouter(options: { allowPrivateProxyForTest?: boolean; trustedProvidersOnly?: boolean } = {}) {
   const router = express.Router();
   const allowPrivate = Boolean(options.allowPrivateProxyForTest);
+  const vylaBaseFor = (query: unknown) => options.trustedProvidersOnly
+    ? process.env.VYLA_STREAM_API_BASE_URL
+    : typeof query === 'string' && query ? query : process.env.VYLA_STREAM_API_BASE_URL;
 
   // Unified Node.js HLS/Segment/Subtitle/MP4 Proxy Endpoints (Zero Cloudflare)
   router.all('/proxy', (req, res) => void handleUnifiedProxyRequest(req, res, 'auto', allowPrivate));
@@ -165,8 +169,8 @@ export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } 
   router.get('/streams/movie/:contentId', async (req, res) => {
     const rawId = req.params.contentId;
     const originBase = req.query.absolute === '1' ? buildPublicOrigin(req) : '';
-    const vylaBaseUrl = typeof req.query.vylaUrl === 'string' ? req.query.vylaUrl : '';
-    const verifyAll = req.query.verify !== 'false';
+    const vylaBaseUrl = vylaBaseFor(req.query.vylaUrl);
+    const verifyAll = options.trustedProvidersOnly || req.query.verify !== 'false';
 
     // Handle Internet Archive public domain movies cleanly
     if (rawId.startsWith('ia_movie_')) {
@@ -231,19 +235,29 @@ export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } 
     const rawId = req.params.contentId;
     const season = Number(req.params.season || 1);
     const episode = Number(req.params.episode || 1);
-    const titleHint = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const titleHint = typeof req.query.title === 'string' ? req.query.title.trim().slice(0, 200) : '';
     const isAnimeHint = req.query.anime === '1' || req.query.anime === 'true' || rawId.startsWith('anime_');
     const preferDub = req.query.dub === '1' || req.query.dub === 'true';
-    const animeFallback = req.query.animeFallback !== 'false';
-    const vylaBaseUrl = typeof req.query.vylaUrl === 'string' ? req.query.vylaUrl : '';
+    const animeFallback = req.query.animeFallback !== 'false' && req.query.animeFallback !== '0';
+    const vylaBaseUrl = vylaBaseFor(req.query.vylaUrl);
     const originBase = req.query.absolute === '1' ? buildPublicOrigin(req) : '';
+    if (!Number.isSafeInteger(season) || season < 0 || !Number.isSafeInteger(episode) || episode < 1) {
+      res.status(400).json({ error: 'Invalid season or episode number' });
+      return;
+    }
+    const tmdbMatch = rawId.match(/^(?:tmdb_tv_)?(\d+)$/);
+    const animeTitle = rawId.startsWith('anime_') ? rawId.replace(/^anime_(?:al_\d+_)?/, '').replace(/-/g, ' ') : '';
+    const fallbackTitle = titleHint || animeTitle;
+    const tmdbFallback = !tmdbMatch && fallbackTitle && (!isAnimeHint || animeFallback)
+      ? findTmdbTvIdByTitle(fallbackTitle, isAnimeHint).catch(() => null)
+      : Promise.resolve(null);
 
     const sources: ResolvedStreamSource[] = [];
     const subtitles: ResolvedSubtitleTrack[] = [];
     const diagnostics: Array<Record<string, unknown>> = [];
 
     // If explicitly an anime slug from 123anime or flagged as anime, query 123anime-api directly
-    if (rawId.startsWith('anime_') || (isAnimeHint && titleHint)) {
+    if (rawId.startsWith('anime_') || (isAnimeHint && animeFallback && titleHint)) {
       const aStart = Date.now();
       let slug = rawId.startsWith('anime_') ? rawId.replace(/^anime_/, '') : '';
       if (!slug && titleHint) {
@@ -273,21 +287,7 @@ export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } 
       typeof req.query.preferredProvider === 'string' ? req.query.preferredProvider : 'auto';
 
     // Query VidZee + X8RR + Vyla for TMDB series (directly, or by resolving title -> TMDB ID when anime/tvmaze fallback needed)
-    let tmdbTvId: number | null = null;
-    const tmdbMatch = rawId.match(/^(?:tmdb_tv_)?(\d+)$/);
-    if (tmdbMatch) {
-      tmdbTvId = Number(tmdbMatch[1]);
-    } else if (sources.length === 0 && titleHint && isTmdbConfigured()) {
-      try {
-        const searchRes = await searchAllCatalog(titleHint, 1);
-        const topSeries = searchRes.series?.[0];
-        if (topSeries?.externalId && /^\d+$/.test(topSeries.externalId)) {
-          tmdbTvId = Number(topSeries.externalId);
-        }
-      } catch {
-        tmdbTvId = null;
-      }
-    }
+    const tmdbTvId = tmdbMatch ? Number(tmdbMatch[1]) : sources.length === 0 ? await tmdbFallback : null;
 
     if (tmdbTvId && (sources.length === 0 || animeFallback || !isAnimeHint)) {
       const tvRes = await resolveMovieOrTvStreams({
@@ -298,7 +298,7 @@ export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } 
         originBase,
         vylaBaseUrl,
         preferredProvider,
-        verifyAll: req.query.verify !== 'false',
+        verifyAll: options.trustedProvidersOnly || req.query.verify !== 'false',
       });
       sources.push(...tvRes.sources);
       for (const s of tvRes.subtitles) {

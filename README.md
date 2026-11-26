@@ -24,6 +24,8 @@ All stream resolution, manifest rewriting, and HTTP proxying run inside the Expr
 - `ANIME123_BASE_URL=` (Optional mirror override for 123anime scraper)
 - `VYLA_STREAM_API_BASE_URL=` (Optional external Vyla gateway URL)
 
+On Netlify, Vite serves the frontend and Netlify Server handles the catalog, playback, subtitles, and downloads. Set `TMDB_API_KEY` in the Functions scope for the deploy context. The server keeps this key private and uses it to sign media URLs so the public proxy only accepts links issued by the app. If you use Vyla, configure `VYLA_STREAM_API_BASE_URL` server-side; public requests cannot supply their own gateway. HLS downloads use the bundled FFmpeg executable to package video and audio into MP4. Playback and downloads are only offered when an upstream source is available.
+
 ## Commands
 
 ```bash

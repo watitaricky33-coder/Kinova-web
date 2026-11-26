@@ -4,8 +4,8 @@ import {
   buildDownloadEndpointUrl,
   buildProxyUrl,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
-import type { ResolvedStreamSource, ResolvedSubtitleTrack } from './vidzeeProvider.js';
+} from '../proxyEngine.ts';
+import type { ResolvedStreamSource, ResolvedSubtitleTrack } from './vidzeeProvider.ts';
 
 export interface AnimeSearchItem {
   id: string;
@@ -490,7 +490,7 @@ export async function resolveAnimeEpisode123(params: {
             buildProxyUrl(trUrl, originBase, '/api/sub-proxy', {
               referer: `${embedOrigin}/`,
               origin: embedOrigin,
-            }) + '&format=vtt',
+            }),
           format: trUrl.toLowerCase().includes('.srt') ? 'srt' : 'vtt',
         });
       }

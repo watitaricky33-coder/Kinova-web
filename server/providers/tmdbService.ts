@@ -1,5 +1,5 @@
-import { TtlLruCache } from '../proxyEngine.js';
-import { getPopularAnime123, searchAnime123 } from './animeProvider.js';
+import { TtlLruCache } from '../proxyEngine.ts';
+import { getPopularAnime123, searchAnime123 } from './animeProvider.ts';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
@@ -459,6 +459,24 @@ export async function getSeriesCatalog(params: {
     totalPages: Math.min(dto.total_pages || 1, 500),
     totalResults: dto.total_results || 0,
   };
+}
+
+export async function findTmdbTvIdByTitle(title: string, anime: boolean): Promise<number | null> {
+  if (!isTmdbConfigured() || !title.trim()) return null;
+  const normalize = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const expected = normalize(title);
+  if (!expected) return null;
+  const { results } = await tmdbFetch<{ results: {
+    id: number;
+    name: string;
+    original_name: string;
+    original_language: string;
+    genre_ids: number[];
+  }[] }>('/search/tv', { query: title });
+  return results.find((match) =>
+    (!anime || (match.original_language === 'ja' && match.genre_ids.includes(16))) &&
+    [match.name, match.original_name].some((name) => normalize(name) === expected)
+  )?.id ?? null;
 }
 
 export async function searchAllCatalog(query: string, page = 1) {

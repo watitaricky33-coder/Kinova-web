@@ -2,9 +2,10 @@ import {
   DEFAULT_USER_AGENT,
   TtlLruCache,
   buildDownloadEndpointUrl,
+  fetchExternalMedia,
   buildProxyUrl,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
+} from '../proxyEngine.ts';
 
 export interface ResolvedSubtitleTrack {
   language: string;
@@ -89,7 +90,7 @@ function normalizeSubtitleTracks(
       buildProxyUrl(rawUrl, originBase, '/api/sub-proxy', {
         referer: headers.Referer || headers.referer,
         origin: headers.Origin || headers.origin,
-      }) + '&format=vtt';
+      });
     tracks.push({
       language,
       label,
@@ -554,7 +555,7 @@ export async function resolveMovieOrTvStreams(params: {
     preferredProvider = 'auto',
     verifyAll = true,
   } = params;
-  const cacheKey = `v2:${mediaType}:${tmdbId}:${season ?? 0}:${episode ?? 0}:${originBase}:${preferredProvider}`;
+  const cacheKey = JSON.stringify([mediaType, tmdbId, season, episode, originBase, preferredProvider, vylaBaseUrl, verifyAll]);
   const cached = streamCache.get(cacheKey);
   if (cached && cached.sources.length > 0) {
     return cached;
@@ -690,7 +691,7 @@ export async function resolveMovieOrTvStreams(params: {
         mediaType === 'tv' && season && episode
           ? `${cleanVyla}/tv?id=${tmdbId}&season=${season}&episode=${episode}`
           : `${cleanVyla}/movie?id=${tmdbId}`;
-      const res = await fetch(sseEndpoint, { signal: AbortSignal.timeout(5000) });
+      const res = await fetchExternalMedia(sseEndpoint, { signal: AbortSignal.timeout(5000) });
       if (res.ok) {
         const body = await res.text();
         let added = 0;
@@ -699,7 +700,9 @@ export async function resolveMovieOrTvStreams(params: {
           try {
             const evt = JSON.parse(line.slice(5).trim());
             if (evt.type === 'source' && evt.directUrl) {
-              const sType: 'hls' | 'mp4' = evt.streamType === 'mp4' ? 'mp4' : 'hls';
+              const probe = await verifyPlayableCandidate(evt.directUrl, evt.headers, 2500);
+              if (!probe.ok || !probe.streamType) continue;
+              const sType = probe.streamType;
               const ref = evt.headers?.Referer || evt.headers?.referer;
               const ori = evt.headers?.Origin || evt.headers?.origin;
               verifiedSources.push({
