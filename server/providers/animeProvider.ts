@@ -4,8 +4,8 @@ import {
   buildDownloadEndpointUrl,
   buildProxyUrl,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
-import type { ResolvedStreamSource, ResolvedSubtitleTrack } from './vidzeeProvider.js';
+} from '../proxyEngine.ts';
+import type { ResolvedStreamSource, ResolvedSubtitleTrack } from './vidzeeProvider.ts';
 
 export interface AnimeSearchItem {
   id: string;

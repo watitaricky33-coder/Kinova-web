@@ -6,20 +6,20 @@ import {
   handleStreamDownloadRequest,
   handleUnifiedProxyRequest,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
+} from '../proxyEngine.ts';
 import {
   probeVidZeeHealth,
   resolveMovieOrTvStreams,
   type ResolvedStreamSource,
   type ResolvedSubtitleTrack,
-} from '../providers/vidzeeProvider.js';
+} from '../providers/vidzeeProvider.ts';
 import {
   getAnimeDetails123,
   getPopularAnime123,
   probeAnime123Health,
   resolveAnimeEpisode123,
   searchAnime123,
-} from '../providers/animeProvider.js';
+} from '../providers/animeProvider.ts';
 import {
   getHomeDiscovery,
   getMovieDetailsFull,
@@ -28,7 +28,7 @@ import {
   getSeriesDetailsFull,
   isTmdbConfigured,
   searchAllCatalog,
-} from '../providers/tmdbService.js';
+} from '../providers/tmdbService.ts';
 
 export function createApiRouter(options: { allowPrivateProxyForTest?: boolean } = {}) {
   const router = express.Router();

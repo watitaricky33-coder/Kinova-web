@@ -24,6 +24,8 @@ All stream resolution, manifest rewriting, and HTTP proxying run inside the Expr
 - `ANIME123_BASE_URL=` (Optional mirror override for 123anime scraper)
 - `VYLA_STREAM_API_BASE_URL=` (Optional external Vyla gateway URL)
 
+On Netlify, the Vite build serves the frontend and Netlify Server handles `/api/health` and `/api/tmdb/*`. Set `TMDB_API_KEY` in the Functions scope for the deploy context. `/api/health` reports whether a key is present; a successful `/api/tmdb/movies` response with `tmdb_movie_` IDs verifies live TMDB access.
+
 ## Commands
 
 ```bash

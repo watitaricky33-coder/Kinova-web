@@ -1,5 +1,5 @@
-import { TtlLruCache } from '../proxyEngine.js';
-import { getPopularAnime123, searchAnime123 } from './animeProvider.js';
+import { TtlLruCache } from '../proxyEngine.ts';
+import { getPopularAnime123, searchAnime123 } from './animeProvider.ts';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_IMG = 'https://image.tmdb.org/t/p';

@@ -4,7 +4,7 @@ import {
   buildDownloadEndpointUrl,
   buildProxyUrl,
   verifyPlayableCandidate,
-} from '../proxyEngine.js';
+} from '../proxyEngine.ts';
 
 export interface ResolvedSubtitleTrack {
   language: string;
